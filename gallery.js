@@ -118,14 +118,18 @@
 
       var thumbsRef = useRef(null);
       var thumbRefs = useRef([]);
-      var swipeRef = useRef(null);
+      var viewportRef = useRef(null);
       var suppressClickRef = useRef(false);
-      var loadedRef = useRef({});
+      var pointersRef = useRef({});   // { pointerId: { x, y } }
+      var gestureRef = useRef(null);  // current gesture state
       var [dragOffset, setDragOffset] = useState(0);
       var [closeDragOffset, setCloseDragOffset] = useState(0);
       var [loadedImages, setLoadedImages] = useState({});
+      var [zoom, setZoom] = useState(1);
+      var [panOffset, setPanOffset] = useState({ x: 0, y: 0 });
       var isFullscreen = className.indexOf('media-gallery_fullscreen') !== -1;
 
+      // Scroll active thumbnail into view
       useEffect(function () {
         var container = thumbsRef.current;
         var activeThumb = thumbRefs.current[activeIndex];
@@ -141,50 +145,180 @@
           activeThumb.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
       }, [activeIndex, thumbnailsPlacement]);
 
-      function handlePointerDown(e) {
-        if ((!hasSeveralItems && !isFullscreen) || e.pointerType === 'mouse') return;
-        swipeRef.current = { pointerId: e.pointerId, startX: e.clientX, startY: e.clientY, currentX: e.clientX };
-        e.currentTarget.setPointerCapture(e.pointerId);
+      // Reset zoom when slide changes
+      useEffect(function () {
+        setZoom(1);
+        setPanOffset({ x: 0, y: 0 });
+        pointersRef.current = {};
+        gestureRef.current = null;
+        setDragOffset(0);
+        setCloseDragOffset(0);
+      }, [activeIndex]);
+
+      // Non-passive wheel listener for zoom (React adds passive by default)
+      useEffect(function () {
+        if (!isFullscreen) return;
+        var el = viewportRef.current;
+        if (!el) return;
+        function onWheel(e) {
+          e.preventDefault();
+          var factor = e.deltaY < 0 ? 1.18 : 1 / 1.18;
+          setZoom(function (z) {
+            var nz = clamp(z * factor, 1, 4);
+            if (nz <= 1.02) { setPanOffset({ x: 0, y: 0 }); return 1; }
+            return nz;
+          });
+        }
+        el.addEventListener('wheel', onWheel, { passive: false });
+        return function () { el.removeEventListener('wheel', onWheel); };
+      }, [isFullscreen]);
+
+      function clampPan(x, y, z) {
+        var el = viewportRef.current;
+        if (!el || z <= 1) return { x: 0, y: 0 };
+        var maxX = el.offsetWidth * (z - 1) / 2;
+        var maxY = el.offsetHeight * (z - 1) / 2;
+        return { x: clamp(x, -maxX, maxX), y: clamp(y, -maxY, maxY) };
       }
+
+      function handlePointerDown(e) {
+        pointersRef.current[e.pointerId] = { x: e.clientX, y: e.clientY };
+        e.currentTarget.setPointerCapture(e.pointerId);
+        var ids = Object.keys(pointersRef.current);
+
+        if (ids.length >= 2) {
+          // Start pinch
+          var pts = Object.values(pointersRef.current);
+          var dist = Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y);
+          gestureRef.current = { type: 'pinch', startDist: dist, startZoom: zoom,
+            startPanX: panOffset.x, startPanY: panOffset.y };
+          setDragOffset(0);
+        } else {
+          gestureRef.current = {
+            type: 'pending',
+            pointerId: e.pointerId,
+            startX: e.clientX, startY: e.clientY,
+            currentX: e.clientX,
+            startPanX: panOffset.x, startPanY: panOffset.y
+          };
+        }
+      }
+
       function handlePointerMove(e) {
-        var swipe = swipeRef.current;
-        if (!swipe || swipe.pointerId !== e.pointerId) return;
-        var dx = e.clientX - swipe.startX, dy = e.clientY - swipe.startY;
-        swipe.currentX = e.clientX;
-        if (!swipe.lockedAxis && (Math.abs(dx) > 8 || Math.abs(dy) > 8))
-          swipe.lockedAxis = Math.abs(dx) > Math.abs(dy) ? 'horizontal' : 'vertical';
-        if (swipe.lockedAxis === 'vertical' && isFullscreen && onClose && isMobile()) {
-          if (dy > 0) { suppressClickRef.current = true; setCloseDragOffset(dy); }
+        if (!pointersRef.current[e.pointerId]) return;
+        pointersRef.current[e.pointerId] = { x: e.clientX, y: e.clientY };
+        var gesture = gestureRef.current;
+        if (!gesture) return;
+        var ids = Object.keys(pointersRef.current);
+
+        if (ids.length >= 2 && gesture.type === 'pinch') {
+          var pts = Object.values(pointersRef.current);
+          var dist = Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y);
+          var newZoom = clamp(gesture.startZoom * (dist / gesture.startDist), 1, 4);
+          setZoom(newZoom);
+          if (newZoom <= 1) setPanOffset({ x: 0, y: 0 });
+          else setPanOffset(function (p) { return clampPan(p.x, p.y, newZoom); });
           return;
         }
-        if (swipe.lockedAxis !== 'horizontal' || !hasSeveralItems) return;
-        var isFirst = activeIndex === 0, isLast = activeIndex === items.length - 1;
-        var resisted = (isFirst && dx > 0) || (isLast && dx < 0) ? dx * 0.32 : dx;
-        suppressClickRef.current = true;
-        setDragOffset(resisted);
-      }
-      function finishSwipe(e) {
-        var swipe = swipeRef.current;
-        if (!swipe || swipe.pointerId !== e.pointerId) return;
-        var dx = swipe.currentX - swipe.startX, dy = e.clientY - swipe.startY;
-        if (swipe.lockedAxis === 'horizontal' && Math.abs(dx) > 54) {
-          if (dx < 0 && activeIndex < items.length - 1) next();
-          if (dx > 0 && activeIndex > 0) previous();
+
+        if (gesture.pointerId !== e.pointerId) return;
+        var dx = e.clientX - gesture.startX;
+        var dy = e.clientY - gesture.startY;
+        gesture.currentX = e.clientX;
+
+        // Determine gesture type on first significant move
+        if (gesture.type === 'pending' && (Math.abs(dx) > 6 || Math.abs(dy) > 6)) {
+          var axisHoriz = Math.abs(dx) > Math.abs(dy);
+          if (zoom > 1 && isFullscreen) {
+            gesture.type = 'pan';
+          } else if (axisHoriz && hasSeveralItems) {
+            gesture.type = 'swipe';
+          } else if (!axisHoriz && isFullscreen && onClose && isMobile()) {
+            gesture.type = 'close-drag';
+          } else {
+            gesture.type = 'idle';
+          }
         }
-        if (swipe.lockedAxis === 'vertical' && isFullscreen && onClose && isMobile() && dy > 96) onClose();
-        if (Math.abs(dx) > 8) {
+
+        if (gesture.type === 'pan') {
           suppressClickRef.current = true;
-          setTimeout(function () { suppressClickRef.current = false; }, 0);
+          setPanOffset(clampPan(gesture.startPanX + dx, gesture.startPanY + dy, zoom));
+        } else if (gesture.type === 'swipe') {
+          var isFirst = activeIndex === 0, isLast = activeIndex === items.length - 1;
+          var resisted = (isFirst && dx > 0) || (isLast && dx < 0) ? dx * 0.32 : dx;
+          suppressClickRef.current = true;
+          setDragOffset(resisted);
+        } else if (gesture.type === 'close-drag') {
+          if (dy > 0) { suppressClickRef.current = true; setCloseDragOffset(dy); }
         }
-        setDragOffset(0); setCloseDragOffset(0); swipeRef.current = null;
       }
-      function handleViewportClick() {
+
+      function finishPointer(e) {
+        var gesture = gestureRef.current;
+        if (gesture) {
+          if (gesture.type === 'swipe') {
+            var dx = gesture.currentX - gesture.startX;
+            if (Math.abs(dx) > 54) {
+              if (dx < 0 && activeIndex < items.length - 1) next();
+              if (dx > 0 && activeIndex > 0) previous();
+            }
+            setDragOffset(0);
+            if (Math.abs(dx) > 8) {
+              suppressClickRef.current = true;
+              setTimeout(function () { suppressClickRef.current = false; }, 0);
+            }
+          } else if (gesture.type === 'close-drag') {
+            var dy = e.clientY - gesture.startY;
+            if (dy > 96 && onClose) onClose();
+            setCloseDragOffset(0);
+          } else if (gesture.type === 'pan') {
+            suppressClickRef.current = true;
+            setTimeout(function () { suppressClickRef.current = false; }, 0);
+          }
+        }
+
+        delete pointersRef.current[e.pointerId];
+        var remaining = Object.keys(pointersRef.current).length;
+        if (remaining === 0) {
+          gestureRef.current = null;
+        } else if (remaining === 1 && gesture && gesture.type === 'pinch') {
+          // One finger lifted after pinch — set up pan state
+          var remainId = Object.keys(pointersRef.current)[0];
+          var pt = pointersRef.current[remainId];
+          gestureRef.current = {
+            type: 'pending', pointerId: remainId,
+            startX: pt.x, startY: pt.y, currentX: pt.x,
+            startPanX: panOffset.x, startPanY: panOffset.y
+          };
+        }
+      }
+
+      // Double-tap / double-click: toggle zoom 1x ↔ 2x
+      var lastTapRef = useRef(0);
+      function handleViewportClick(e) {
         if (suppressClickRef.current) return;
+        if (isFullscreen) {
+          var now = Date.now();
+          if (now - lastTapRef.current < 300) {
+            lastTapRef.current = 0;
+            setZoom(function (z) {
+              if (z > 1.05) { setPanOffset({ x: 0, y: 0 }); return 1; }
+              return 2;
+            });
+          } else {
+            lastTapRef.current = now;
+          }
+          return;
+        }
         if (onViewportClick) onViewportClick();
       }
 
       var thumbsProps = { items: items, activeIndex: activeIndex, setActiveIndex: setActiveIndex,
         thumbsRef: thumbsRef, thumbRefs: thumbRefs, placement: thumbnailsPlacement };
+
+      var vpCursor = isFullscreen
+        ? (zoom > 1 ? 'grab' : 'zoom-in')
+        : (onViewportClick ? 'pointer' : 'default');
 
       return h('div', {
         className: 'media-gallery' + (isPopup ? ' media-gallery_popup' : '') + (closeDragOffset ? ' media-gallery_close_dragging' : '') + (className ? ' ' + className : ''),
@@ -196,13 +330,17 @@
           showThumbnails && thumbnailsPlacement === 'side' && h(Thumbnails, thumbsProps),
           h('div', { className: 'media-gallery__frame' },
             h('div', {
+              ref: viewportRef,
               className: 'media-gallery__viewport',
+              style: { cursor: vpCursor, touchAction: isFullscreen && zoom > 1 ? 'none' : undefined },
               role: onViewportClick ? 'button' : undefined,
               'aria-label': onViewportClick ? 'Открыть полноэкранно' : undefined,
               tabIndex: onViewportClick ? 0 : -1,
               onClick: handleViewportClick,
-              onPointerDown: handlePointerDown, onPointerMove: handlePointerMove,
-              onPointerUp: finishSwipe, onPointerCancel: finishSwipe,
+              onPointerDown: handlePointerDown,
+              onPointerMove: handlePointerMove,
+              onPointerUp: finishPointer,
+              onPointerCancel: finishPointer,
               onKeyDown: function (e) {
                 if (!onViewportClick) return;
                 if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onViewportClick(); }
@@ -212,24 +350,39 @@
                 className: 'media-gallery__track' + (dragOffset ? ' media-gallery__track_dragging' : ''),
                 style: { transform: 'translateX(calc(' + (-activeIndex * 100) + '% + ' + dragOffset + 'px))' }
               }, items.map(function (item, idx) {
+                var isActiveSlide = idx === activeIndex;
+                var zoomTransform = isFullscreen && isActiveSlide && zoom !== 1
+                  ? 'translate(' + panOffset.x + 'px, ' + panOffset.y + 'px) scale(' + zoom + ')'
+                  : undefined;
+
                 return h('div', {
                   className: 'media-gallery__slide' + (item.type === 'image' && !loadedImages[item.id] ? ' media-gallery__slide_loading' : ''),
                   key: item.id, 'aria-hidden': idx !== activeIndex
                 },
-                  item.type === 'image' ? [
-                    h('div', { key: 'bd', className: 'media-gallery__image-backdrop', 'aria-hidden': 'true', style: { backgroundImage: 'url(' + item.src + ')' } }),
-                    h('img', { key: 'img', className: 'media-gallery__image', src: item.src, alt: item.alt || '',
-                      onLoad: function () { setLoadedImages(function (cur) { var n = Object.assign({}, cur); n[item.id] = true; return n; }); } }),
-                    onViewportClick && h('button', { key: 'fs', className: 'media-gallery__open-fullscreen', type: 'button', 'aria-label': 'Полный экран',
-                      onClick: function (e) { e.stopPropagation(); handleViewportClick(); } })
-                  ] : h('div', { className: 'media-gallery__video-wrap' },
-                    h('video', {
-                      ref: function (node) { videoRefs.current[idx] = node; },
-                      className: 'media-gallery__video', src: item.src, poster: item.poster,
-                      controls: true, muted: true, playsInline: true, preload: 'metadata'
-                    }),
-                    onViewportClick && h('button', { className: 'media-gallery__open-fullscreen', type: 'button', 'aria-label': 'Полный экран',
-                      onClick: function (e) { e.stopPropagation(); handleViewportClick(); } })
+                  h('div', {
+                    style: {
+                      width: '100%', height: '100%',
+                      transform: zoomTransform,
+                      transformOrigin: 'center',
+                      transition: gestureRef.current ? 'none' : 'transform 0.12s ease',
+                      willChange: zoomTransform ? 'transform' : undefined
+                    }
+                  },
+                    item.type === 'image' ? [
+                      h('div', { key: 'bd', className: 'media-gallery__image-backdrop', 'aria-hidden': 'true', style: { backgroundImage: 'url(' + item.src + ')' } }),
+                      h('img', { key: 'img', className: 'media-gallery__image', src: item.src, alt: item.alt || '',
+                        onLoad: function () { setLoadedImages(function (cur) { var n = Object.assign({}, cur); n[item.id] = true; return n; }); } }),
+                      onViewportClick && h('button', { key: 'fs', className: 'media-gallery__open-fullscreen', type: 'button', 'aria-label': 'Полный экран',
+                        onClick: function (e) { e.stopPropagation(); handleViewportClick(); } })
+                    ] : h('div', { className: 'media-gallery__video-wrap' },
+                      h('video', {
+                        ref: function (node) { videoRefs.current[idx] = node; },
+                        className: 'media-gallery__video', src: item.src, poster: item.poster,
+                        controls: true, muted: true, playsInline: true, preload: 'metadata'
+                      }),
+                      onViewportClick && h('button', { className: 'media-gallery__open-fullscreen', type: 'button', 'aria-label': 'Полный экран',
+                        onClick: function (e) { e.stopPropagation(); handleViewportClick(); } })
+                    )
                   )
                 );
               }))
@@ -609,19 +762,18 @@
           if (!isMediaLink) return; // обычная ссылка — не перехватываем
         }
 
-        // Ищем ближайшую «группу» для сбора всех соседних фото
-        var container = null;
-        for (var gi = 0; gi < GROUP_PARENTS.length; gi++) {
-          var c = img.closest(GROUP_PARENTS[gi]);
-          if (c) { container = c; break; }
-        }
-        if (!container) container = img.parentElement || document.body;
-
-        // Собираем все img внутри контейнера (исключая наш UI и иконки)
-        var allImgs = Array.from(container.querySelectorAll('img')).filter(function (i) {
-          return !i.closest('.media-gallery') &&
-                 !i.closest('#media-gallery-overlay-root') &&
-                 !isSmallIcon(i);
+        // Собираем ВСЕ картинки на странице (кроме nav/header/footer/иконок)
+        var allImgs = Array.from(document.querySelectorAll('img')).filter(function (i) {
+          if (i.closest('.media-gallery') || i.closest('#media-gallery-overlay-root')) return false;
+          if (i.closest('[data-gallery="off"]')) return false;
+          if (isSmallIcon(i)) return false;
+          var explicitOn = !!i.closest('[data-gallery="on"]');
+          if (!explicitOn) {
+            for (var si = 0; si < SKIP_INSIDE.length; si++) {
+              if (i.closest(SKIP_INSIDE[si])) return false;
+            }
+          }
+          return true;
         });
 
         var items = [];
@@ -662,6 +814,10 @@
         '.ss-slider',
         '.ss-slideshow',
         '[class*="module"][class*="slider"]',
+        '[class*="slideshow"]',
+        '[class*="carousel"]',
+        '.media-module',
+        '.semplice-media',
         '[data-gallery="slider"]'  // явная метка
       ];
 
