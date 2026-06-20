@@ -185,6 +185,7 @@
       }
 
       function handlePointerDown(e) {
+        e.preventDefault(); // блокируем выделение текста и drag изображения
         pointersRef.current[e.pointerId] = { x: e.clientX, y: e.clientY };
         e.currentTarget.setPointerCapture(e.pointerId);
         var ids = Object.keys(pointersRef.current);
@@ -319,8 +320,9 @@
       var thumbsProps = { items: items, activeIndex: activeIndex, setActiveIndex: setActiveIndex,
         thumbsRef: thumbsRef, thumbRefs: thumbRefs, placement: thumbnailsPlacement };
 
+      var isDraggingNow = gestureRef.current && gestureRef.current.type === 'pan';
       var vpCursor = isFullscreen
-        ? (zoom > 1 ? 'grab' : 'zoom-in')
+        ? (zoom > 1 ? (isDraggingNow ? 'grabbing' : 'grab') : 'zoom-in')
         : (onViewportClick ? 'pointer' : 'default');
 
       return h('div', {
@@ -336,7 +338,7 @@
             h('div', {
               ref: viewportRef,
               className: 'media-gallery__viewport',
-              style: { cursor: vpCursor, touchAction: isFullscreen && zoom > 1 ? 'none' : undefined },
+              style: { cursor: vpCursor, touchAction: isFullscreen && zoom > 1 ? 'none' : undefined, userSelect: 'none', WebkitUserSelect: 'none' },
               role: onViewportClick ? 'button' : undefined,
               'aria-label': onViewportClick ? 'Открыть полноэкранно' : undefined,
               tabIndex: onViewportClick ? 0 : -1,
@@ -375,6 +377,7 @@
                     item.type === 'image' ? [
                       h('div', { key: 'bd', className: 'media-gallery__image-backdrop', 'aria-hidden': 'true', style: { backgroundImage: 'url(' + item.src + ')' } }),
                       h('img', { key: 'img', className: 'media-gallery__image', src: item.src, alt: item.alt || '',
+                        draggable: false,
                         style: naturalSize ? { objectFit: 'contain', width: '100%', height: '100%' } : undefined,
                         onLoad: (function(capturedIdx, capturedId) { return function (e) {
                           setLoadedImages(function (cur) { var n = Object.assign({}, cur); n[capturedId] = true; return n; });
