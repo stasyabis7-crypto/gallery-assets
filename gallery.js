@@ -114,6 +114,7 @@
           onClose = props.onClose,
           onViewportClick = props.onViewportClick,
           thumbnailsPlacement = props.thumbnailsPlacement || 'bottom',
+          naturalSize = props.naturalSize || false,
           className = props.className || '';
 
       var thumbsRef = useRef(null);
@@ -127,6 +128,7 @@
       var [loadedImages, setLoadedImages] = useState({});
       var [zoom, setZoom] = useState(1);
       var [panOffset, setPanOffset] = useState({ x: 0, y: 0 });
+      var [frameAspect, setFrameAspect] = useState(null);
       var isFullscreen = className.indexOf('media-gallery_fullscreen') !== -1;
 
       // Scroll active thumbnail into view
@@ -145,7 +147,7 @@
           activeThumb.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
       }, [activeIndex, thumbnailsPlacement]);
 
-      // Reset zoom when slide changes
+      // Reset zoom + frameAspect when slide changes
       useEffect(function () {
         setZoom(1);
         setPanOffset({ x: 0, y: 0 });
@@ -153,6 +155,7 @@
         gestureRef.current = null;
         setDragOffset(0);
         setCloseDragOffset(0);
+        if (naturalSize) setFrameAspect(null);
       }, [activeIndex]);
 
       // Non-passive wheel listener for zoom (React adds passive by default)
@@ -328,7 +331,8 @@
         onClose && h('button', { className: 'media-gallery__close', type: 'button', 'aria-label': 'Закрыть', onClick: onClose }, h(IconX)),
         h('div', { className: 'media-gallery__layout' + (showThumbnails && thumbnailsPlacement === 'side' ? ' media-gallery__layout_with_side_thumbs' : '') },
           showThumbnails && thumbnailsPlacement === 'side' && h(Thumbnails, thumbsProps),
-          h('div', { className: 'media-gallery__frame' },
+          h('div', { className: 'media-gallery__frame',
+            style: naturalSize ? { aspectRatio: frameAspect ? String(frameAspect) : 'auto', height: frameAspect ? undefined : 'auto' } : undefined },
             h('div', {
               ref: viewportRef,
               className: 'media-gallery__viewport',
@@ -371,7 +375,13 @@
                     item.type === 'image' ? [
                       h('div', { key: 'bd', className: 'media-gallery__image-backdrop', 'aria-hidden': 'true', style: { backgroundImage: 'url(' + item.src + ')' } }),
                       h('img', { key: 'img', className: 'media-gallery__image', src: item.src, alt: item.alt || '',
-                        onLoad: function () { setLoadedImages(function (cur) { var n = Object.assign({}, cur); n[item.id] = true; return n; }); } }),
+                        style: naturalSize ? { objectFit: 'contain', width: '100%', height: '100%' } : undefined,
+                        onLoad: (function(capturedIdx, capturedId) { return function (e) {
+                          setLoadedImages(function (cur) { var n = Object.assign({}, cur); n[capturedId] = true; return n; });
+                          if (naturalSize && capturedIdx === activeIndex && e.target.naturalWidth) {
+                            setFrameAspect(e.target.naturalWidth / e.target.naturalHeight);
+                          }
+                        }; })(idx, item.id) }),
                       onViewportClick && h('button', { key: 'fs', className: 'media-gallery__open-fullscreen', type: 'button', 'aria-label': 'Полный экран',
                         onClick: function (e) { e.stopPropagation(); handleViewportClick(); } })
                     ] : h('div', { className: 'media-gallery__video-wrap' },
@@ -406,6 +416,7 @@
       var initialIndex = props.initialIndex || 0;
       var previewMode = props.previewMode || 'thumbnails';
       var ariaLabel = props.ariaLabel || 'Галерея';
+      var naturalSize = props.naturalSize || false;
 
       var [activeIndex, setActiveIndex] = useState(function () { return clamp(initialIndex, 0, Math.max(items.length - 1, 0)); });
       var [fullscreenOpen, setFullscreenOpen] = useState(false);
@@ -452,7 +463,7 @@
 
       return h(React.Fragment, null,
         h(GallerySurface, Object.assign({}, surfaceProps, {
-          videoRefs: videoRefs, isPopup: false,
+          videoRefs: videoRefs, isPopup: false, naturalSize: naturalSize,
           onViewportClick: function () { setFullscreenOpen(true); }
         })),
         fullscreenOpen && createPortal(
@@ -565,7 +576,8 @@
         root.render(h(MediaGallery, {
           items: items,
           previewMode: opts.previewMode || 'thumbnails',
-          ariaLabel: opts.ariaLabel || 'Галерея'
+          ariaLabel: opts.ariaLabel || 'Галерея',
+          naturalSize: opts.naturalSize || false
         }));
         return { unmount: function () { root.unmount(); } };
       }
@@ -687,93 +699,33 @@
       }, true /* capture — перехватываем раньше Semplice */);
     }
 
-    // ── interceptAllImages — клик по ЛЮБОЙ картинке → fullscreen ────────
+    // ── interceptAllImages — клик по img.mg-include → fullscreen ────────
     /**
-     * Перехватывает клики по любому <img> на странице.
-     * Собирает все изображения из ближайшего смыслового контейнера
-     * (секция, статья, .module и т.д.) и открывает галерею.
+     * Реагирует ТОЛЬКО на клики по картинкам с классом mg-include.
+     * Открывает галерею со ВСЕМИ img.mg-include на странице.
      *
-     * Исключения (не перехватываются):
-     *   — маленькие картинки < 80px (иконки, логотипы)
-     *   — img внутри <nav>, <header> без явного [data-gallery]
-     *   — img внутри .media-gallery (наш же UI)
-     *   — контейнеры с [data-gallery="off"]
+     * Как добавить класс в Semplice:
+     *   Настройки изображения → поле «CSS Class» → введи: mg-include
      */
     function interceptAllImages() {
-      // Контейнеры, которые считаются «группой» для сбора соседних фото
-      var GROUP_PARENTS = [
-        '.semplice-module', '.module', '.semplice-item', '.work-item',
-        'section', 'article', '.gallery', '.semplice-gallery',
-        '.splide__list', '.slider-wrapper', '[class*="grid"]', '[class*="Grid"]'
-      ];
-
-      // Элементы, внутри которых НЕ перехватываем (если нет явного data-gallery="on")
-      var SKIP_INSIDE = ['nav', 'header', 'footer', '.site-logo', '.mg-fullscreen', '.mg-overlay'];
-
-      function isSmallIcon(img) {
-        // Пропускаем крошечные картинки (иконки, аватары меньше 80px)
-        return (img.naturalWidth > 0 && img.naturalWidth < 80) ||
-               (img.width > 0 && img.width < 80);
-      }
-
       function imgToItem(img, idx) {
         var src = img.getAttribute('data-src') || img.getAttribute('data-lazy-src') ||
                   img.getAttribute('data-original') || img.src || '';
-        // Убираем low-res placeholder (data:image/...)
         if (!src || src.startsWith('data:')) return null;
-        return {
-          id: 'all-img-' + idx + '-' + src.slice(-12),
-          type: 'image',
-          src: src,
-          thumbnailSrc: src,
-          alt: img.alt || ''
-        };
+        return { id: 'mg-inc-' + idx, type: 'image', src: src, thumbnailSrc: src, alt: img.alt || '' };
       }
 
       document.addEventListener('click', function (e) {
         var img = e.target;
-        // Только клик именно по <img>
         if (!img || img.tagName !== 'IMG') return;
-
-        // Не трогаем нашу собственную галерею
+        // Реагируем ТОЛЬКО на mg-include
+        if (!img.classList.contains('mg-include')) return;
+        // Не трогаем наш собственный UI
         if (img.closest('.media-gallery') || img.closest('#media-gallery-overlay-root')) return;
 
-        // Явное отключение
-        if (img.closest('[data-gallery="off"]')) return;
-
-        // Пропускаем nav/header/footer если нет явного включения
-        var hasExplicitOn = !!img.closest('[data-gallery="on"]');
-        if (!hasExplicitOn) {
-          for (var si = 0; si < SKIP_INSIDE.length; si++) {
-            if (img.closest(SKIP_INSIDE[si])) return;
-          }
-        }
-
-        // Пропускаем иконки
-        if (isSmallIcon(img)) return;
-
-        // Если картинка внутри <a href="..."> ведущего НЕ на медиафайл —
-        // скорее всего это навигационная ссылка, не трогаем
-        var parentLink = img.closest('a[href]');
-        if (parentLink && !hasExplicitOn) {
-          var href = parentLink.getAttribute('href') || '';
-          var isMediaLink = /\.(jpg|jpeg|png|gif|webp|avif|mp4|webm)(\?.*)?$/i.test(href) ||
-                            parentLink.hasAttribute('data-lightbox');
-          if (!isMediaLink) return; // обычная ссылка — не перехватываем
-        }
-
-        // Собираем ВСЕ картинки на странице (кроме nav/header/footer/иконок)
-        var allImgs = Array.from(document.querySelectorAll('img')).filter(function (i) {
-          if (i.closest('.media-gallery') || i.closest('#media-gallery-overlay-root')) return false;
-          if (i.closest('[data-gallery="off"]')) return false;
-          if (isSmallIcon(i)) return false;
-          var explicitOn = !!i.closest('[data-gallery="on"]');
-          if (!explicitOn) {
-            for (var si = 0; si < SKIP_INSIDE.length; si++) {
-              if (i.closest(SKIP_INSIDE[si])) return false;
-            }
-          }
-          return true;
+        // Собираем ВСЕ img.mg-include на странице
+        var allImgs = Array.from(document.querySelectorAll('img.mg-include')).filter(function (i) {
+          return !i.closest('.media-gallery') && !i.closest('#media-gallery-overlay-root');
         });
 
         var items = [];
@@ -786,11 +738,10 @@
         });
 
         if (!items.length) return;
-
         e.preventDefault();
         e.stopPropagation();
         window.MediaGallery.open(items, startIndex);
-      }, true /* capture */);
+      }, true);
     }
 
     // ── replaceSliders — встроенный Semplice-слайдер → наша галерея ──────
@@ -928,13 +879,73 @@
       }
     }
 
+    // ── mountManualSliders — ручной монтаж через data-mg-slider ─────────
+    /**
+     * Ищет элементы с атрибутом [data-mg-slider] и монтирует в них
+     * нашу inline-галерею. Картинки берёт из дочерних <img> элементов.
+     *
+     * Использование в Semplice (блок Custom HTML):
+     *   <div data-mg-slider>
+     *     <img src="url1.jpg" alt="Фото 1" />
+     *     <img src="url2.jpg" alt="Фото 2" />
+     *   </div>
+     *
+     * Или через атрибут data-mg-srcs (URL через пробел или запятую):
+     *   <div data-mg-slider data-mg-srcs="url1.jpg,url2.jpg,url3.jpg"></div>
+     */
+    function mountManualSliders() {
+      function processEl(el) {
+        if (el.dataset.mgMounted) return;
+        var items = [];
+
+        // Вариант 1: URL через data-mg-srcs
+        var srcsAttr = el.getAttribute('data-mg-srcs') || '';
+        if (srcsAttr) {
+          srcsAttr.split(/[\s,]+/).filter(Boolean).forEach(function(src, idx) {
+            items.push({ id: 'mg-manual-' + idx, type: /\.(mp4|webm)$/i.test(src) ? 'video' : 'image',
+              src: src, thumbnailSrc: src, alt: '' });
+          });
+        }
+
+        // Вариант 2: дочерние <img> (поддержка data-desktop-src / data-mobile-src)
+        var isDesktop = window.innerWidth >= 950;
+        if (!items.length) {
+          Array.from(el.querySelectorAll('img')).forEach(function(img, idx) {
+            var src = (isDesktop && img.getAttribute('data-desktop-src'))
+                   || (!isDesktop && img.getAttribute('data-mobile-src'))
+                   || img.getAttribute('data-src') || img.src || '';
+            if (!src || src.startsWith('data:')) return;
+            var thumb = img.getAttribute('data-mobile-src') || src;
+            items.push({ id: 'mg-manual-' + idx, type: /\.(mp4|webm)$/i.test(src) ? 'video' : 'image',
+              src: src, thumbnailSrc: thumb, alt: img.alt || '' });
+          });
+        }
+
+        if (!items.length) return;
+        el.dataset.mgMounted = 'true';
+        el.innerHTML = '';
+        window.MediaGallery.mount(el, items, { previewMode: 'thumbnails', naturalSize: true });
+      }
+
+      document.querySelectorAll('[data-mg-slider]').forEach(processEl);
+      setTimeout(function() { document.querySelectorAll('[data-mg-slider]').forEach(processEl); }, 800);
+
+      if (window.MutationObserver) {
+        new MutationObserver(function(mutations) {
+          if (mutations.some(function(m) { return m.addedNodes.length; }))
+            document.querySelectorAll('[data-mg-slider]').forEach(processEl);
+        }).observe(document.body, { childList: true, subtree: true });
+      }
+    }
+
     // ─── Запуск всего ────────────────────────────────────────────────────
     mountGlobalController();
 
     function startAll() {
-      interceptSemplice();   // перехват a[data-lightbox], ссылок на jpg/mp4
-      interceptAllImages();  // перехват кликов по ЛЮБОМУ <img>
-      replaceSliders();      // замена Semplice-слайдеров нашей галереей
+      interceptSemplice();    // перехват a[data-lightbox], ссылок на jpg/mp4
+      interceptAllImages();   // перехват кликов по ЛЮБОМУ <img>
+      replaceSliders();       // замена Semplice-слайдеров нашей галереей
+      mountManualSliders();   // ручной монтаж через [data-mg-slider]
     }
 
     if (document.readyState === 'loading') {
