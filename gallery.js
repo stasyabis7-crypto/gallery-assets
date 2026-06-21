@@ -185,7 +185,6 @@
       }
 
       function handlePointerDown(e) {
-        e.preventDefault(); // блокируем выделение текста и drag изображения
         pointersRef.current[e.pointerId] = { x: e.clientX, y: e.clientY };
         e.currentTarget.setPointerCapture(e.pointerId);
         var ids = Object.keys(pointersRef.current);
@@ -297,6 +296,29 @@
         }
       }
 
+      // ── Mouse drag (desktop) — отдельный обработчик для мыши при зуме ──
+      var mouseDragRef = useRef(null);
+
+      function handleMouseDown(e) {
+        if (!isFullscreen || zoom <= 1 || e.button !== 0) return;
+        var startX = e.clientX, startY = e.clientY;
+        var startPanX = panOffset.x, startPanY = panOffset.y;
+        mouseDragRef.current = true;
+
+        function onMove(ev) {
+          var dx = ev.clientX - startX;
+          var dy = ev.clientY - startY;
+          setPanOffset(clampPan(startPanX + dx, startPanY + dy, zoom));
+        }
+        function onUp() {
+          mouseDragRef.current = null;
+          window.removeEventListener('mousemove', onMove);
+          window.removeEventListener('mouseup', onUp);
+        }
+        window.addEventListener('mousemove', onMove);
+        window.addEventListener('mouseup', onUp);
+      }
+
       // Double-tap / double-click: toggle zoom 1x ↔ 2x
       var lastTapRef = useRef(0);
       function handleViewportClick(e) {
@@ -320,7 +342,7 @@
       var thumbsProps = { items: items, activeIndex: activeIndex, setActiveIndex: setActiveIndex,
         thumbsRef: thumbsRef, thumbRefs: thumbRefs, placement: thumbnailsPlacement };
 
-      var isDraggingNow = gestureRef.current && gestureRef.current.type === 'pan';
+      var isDraggingNow = (gestureRef.current && gestureRef.current.type === 'pan') || !!mouseDragRef.current;
       var vpCursor = isFullscreen
         ? (zoom > 1 ? (isDraggingNow ? 'grabbing' : 'grab') : 'zoom-in')
         : (onViewportClick ? 'pointer' : 'default');
@@ -343,6 +365,7 @@
               'aria-label': onViewportClick ? 'Открыть полноэкранно' : undefined,
               tabIndex: onViewportClick ? 0 : -1,
               onClick: handleViewportClick,
+              onMouseDown: handleMouseDown,
               onPointerDown: handlePointerDown,
               onPointerMove: handlePointerMove,
               onPointerUp: finishPointer,
@@ -378,6 +401,7 @@
                       h('div', { key: 'bd', className: 'media-gallery__image-backdrop', 'aria-hidden': 'true', style: { backgroundImage: 'url(' + item.src + ')' } }),
                       h('img', { key: 'img', className: 'media-gallery__image', src: item.src, alt: item.alt || '',
                         draggable: false,
+                        onDragStart: function(e) { e.preventDefault(); },
                         style: naturalSize ? { objectFit: 'contain', width: '100%', height: '100%' } : undefined,
                         onLoad: (function(capturedIdx, capturedId) { return function (e) {
                           setLoadedImages(function (cur) { var n = Object.assign({}, cur); n[capturedId] = true; return n; });
